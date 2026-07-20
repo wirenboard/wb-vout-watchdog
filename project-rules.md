@@ -11,7 +11,7 @@ truth** for the agent workflow rules and the code style below. It is imported in
 - **No editing existing tests without approval.**
 - **No gratuitous renames** — do not rename existing identifiers (locals, params, functions, methods, classes, module-level constants) unless functionally required (old name became misleading after a behavior change, or a real name clash). Subjective "consistency"/"better naming" doesn't count; expanding a signature does not justify renaming.
 - **No throwaway temp vars** — do not introduce a temporary local variable for 1–2 uses; only if used 3+ times or it materially improves readability.
-- **No silencing tests or linters** — do not disable/skip tests. Do not add `# pylint: disable` / `# noqa` / `# type: ignore`, ever — refactor the code so the warning doesn't apply, instead of suppressing it.
+- **No silencing tests or linters** — do not disable/skip tests. Do not add `# pylint: disable` / `# noqa` / `# type: ignore`, ever — refactor the code so the warning doesn't apply, instead of suppressing it. The one exception: the `bin/` launcher's module name is the hyphenated CLI command (installed to `/usr/bin`), which cannot be snake_case, so `# pylint: disable=C0103` is allowed there (as in wb-mqtt-dali).
 - **Never force-push a PR** — no `--force` / `--force-with-lease` to update a PR. Add new commits — reviewers need incremental changes.
 - **No private access from tests** — tests must not access private attributes (`_underscore`) of production classes, at all. If a test can't be written against the public API, **stop and ask the user** — the fix usually requires widening the API or rethinking the test.
 
