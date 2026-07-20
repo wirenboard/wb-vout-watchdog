@@ -1,0 +1,4 @@
+bin/wb-vout-watchdog /usr/bin
+wb-vout-watchdog.conf /etc
+wb-vout-watchdog.schema.json /usr/share/wb-mqtt-confed/schemas
+30wb-vout-watchdog /etc/wb-configs.d

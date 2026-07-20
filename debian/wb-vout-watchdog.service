@@ -1,0 +1,17 @@
+[Unit]
+Description=Wiren Board Vout undervoltage watchdog
+Before=wb-mqtt-gpio.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+User=root
+ExecStart=/usr/bin/wb-vout-watchdog
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2 6
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=wb-vout-watchdog
+
+[Install]
+WantedBy=multi-user.target

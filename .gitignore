@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+.venv/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+pyproject.toml
+.coveragerc
+
+.vscode/
+.idea/
