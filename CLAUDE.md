@@ -33,7 +33,7 @@ Always use tools from `.venv/bin/...`.
 ```bash
 .venv/bin/isort --settings-file pyproject.toml .
 .venv/bin/black --config pyproject.toml .
-.venv/bin/pylint --rcfile pyproject.toml <package dir> tests
+.venv/bin/pylint --rcfile pyproject.toml <package dir> bin/wb-vout-watchdog tests
 .venv/bin/pytest
 ```
 
