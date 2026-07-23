@@ -1,6 +1,6 @@
-import os
 import struct
 from dataclasses import dataclass
+from pathlib import Path
 
 DEVICETREE_BASE = "/sys/firmware/devicetree/base"
 IIO_DEVICES_DIR = "/sys/bus/iio/devices"
@@ -39,20 +39,20 @@ class VoutGpioLine:
 
 def find_vin_channel(dt_base: str = DEVICETREE_BASE, iio_devices_dir: str = IIO_DEVICES_DIR) -> VinChannel:
     """Locate the Vin IIO channel's raw-value sysfs file and its divider ratio."""
-    node_path = os.path.join(dt_base, ANALOG_INPUTS_NODE, VIN_CHANNEL_NAME)
-    if not os.path.isdir(node_path):
+    node_path = Path(dt_base) / ANALOG_INPUTS_NODE / VIN_CHANNEL_NAME
+    if not node_path.is_dir():
         raise DeviceTreeError(f"device tree node /{ANALOG_INPUTS_NODE}/{VIN_CHANNEL_NAME} not found")
 
     (phandle,) = _read_dt_cells(node_path, "iio-device")
-    iio_node_path = _resolve_phandle(dt_base, phandle)
-    iio_device_dir = _find_iio_device_dir(iio_devices_dir, dt_base, iio_node_path)
+    iio_node_path = _resolve_phandle(Path(dt_base), phandle)
+    iio_device_dir = _find_iio_device_dir(Path(iio_devices_dir), iio_node_path)
     channel_name = _read_dt_string(node_path, "iio-channel-name") or DEFAULT_IIO_CHANNEL_NAME
 
-    raw_path = os.path.join(iio_device_dir, f"in_{channel_name}_raw")
-    if not os.path.isfile(raw_path):
+    raw_path = iio_device_dir / f"in_{channel_name}_raw"
+    if not raw_path.is_file():
         raise DeviceTreeError(f"no raw-value file for channel '{channel_name}' in {iio_device_dir}")
 
-    return VinChannel(raw_path=raw_path, divider_ratio=_read_divider_ratio(node_path))
+    return VinChannel(raw_path=str(raw_path), divider_ratio=_read_divider_ratio(node_path))
 
 
 def find_vout_gpio_line(
@@ -60,21 +60,21 @@ def find_vout_gpio_line(
 ) -> VoutGpioLine:
     """Locate the Vout GPIO line by its `VOUT_GPIO_NODE_NAME` device tree node under
     `/wirenboard/gpios`."""
-    node_path = os.path.join(dt_base, GPIOS_NODE, VOUT_GPIO_NODE_NAME)
-    if not os.path.isdir(node_path):
+    node_path = Path(dt_base) / GPIOS_NODE / VOUT_GPIO_NODE_NAME
+    if not node_path.is_dir():
         raise DeviceTreeError(f"device tree node /{GPIOS_NODE}/{VOUT_GPIO_NODE_NAME} not found")
 
     phandle, offset, flags = _read_dt_cells(node_path, "io-gpios")
-    chip_node_path = _resolve_phandle(dt_base, phandle)
-    chip_path = _find_gpio_chip_path(gpio_devices_dir, dt_base, chip_node_path)
+    chip_node_path = _resolve_phandle(Path(dt_base), phandle)
+    chip_path = _find_gpio_chip_path(Path(gpio_devices_dir), chip_node_path)
 
-    return VoutGpioLine(chip_path=chip_path, offset=offset, active_low=bool(flags & _ACTIVE_LOW_FLAG))
+    return VoutGpioLine(chip_path=str(chip_path), offset=offset, active_low=bool(flags & _ACTIVE_LOW_FLAG))
 
 
 # --- Private ---
 
 
-def _read_divider_ratio(node_path: str) -> float:
+def _read_divider_ratio(node_path: Path) -> float:
     r1_ohms = _read_dt_u32(node_path, "divider-r1-ohms")
     r2_ohms = _read_dt_u32(node_path, "divider-r2-ohms")
     if r1_ohms is None or r2_ohms is None:
@@ -82,79 +82,73 @@ def _read_divider_ratio(node_path: str) -> float:
     return (r1_ohms + r2_ohms) / r2_ohms
 
 
-def _find_iio_device_dir(iio_devices_dir: str, dt_base: str, node_path: str) -> str:
-    target = os.path.join(dt_base, node_path.lstrip("/"))
-    if not os.path.isdir(iio_devices_dir):
+def _find_iio_device_dir(iio_devices_dir: Path, node_path: Path) -> Path:
+    if not iio_devices_dir.is_dir():
         raise DeviceTreeError(f"no IIO devices found under {iio_devices_dir}")
 
-    for entry in sorted(os.listdir(iio_devices_dir)):
-        device_dir = os.path.join(iio_devices_dir, entry)
-        if _of_node_points_to(os.path.join(device_dir, "of_node"), target):
+    for device_dir in sorted(iio_devices_dir.iterdir()):
+        if _of_node_points_to(device_dir / "of_node", node_path):
             return device_dir
 
     raise DeviceTreeError(f"no IIO device matches device tree node {node_path}")
 
 
-def _find_gpio_chip_path(gpio_devices_dir: str, dt_base: str, node_path: str) -> str:
-    target = os.path.join(dt_base, node_path.lstrip("/"))
-    if not os.path.isdir(gpio_devices_dir):
+def _find_gpio_chip_path(gpio_devices_dir: Path, node_path: Path) -> Path:
+    if not gpio_devices_dir.is_dir():
         raise DeviceTreeError(f"no GPIO chips found under {gpio_devices_dir}")
 
-    for entry in sorted(os.listdir(gpio_devices_dir)):
-        chip_dir = os.path.join(gpio_devices_dir, entry)
-        for of_node in (os.path.join(chip_dir, "of_node"), os.path.join(chip_dir, "device", "of_node")):
-            if _of_node_points_to(of_node, target):
-                return os.path.join("/dev", entry)
+    for chip_dir in sorted(gpio_devices_dir.iterdir()):
+        of_nodes = (chip_dir / "of_node", chip_dir / "device" / "of_node")
+        if any(_of_node_points_to(of_node, node_path) for of_node in of_nodes):
+            return Path("/dev") / chip_dir.name
 
     raise DeviceTreeError(f"no GPIO chip matches device tree node {node_path}")
 
 
-def _of_node_points_to(of_node: str, target: str) -> bool:
+def _of_node_points_to(of_node: Path, target: Path) -> bool:
     """Whether the `of_node` symlink of a sysfs device resolves to the device-tree `target`."""
-    return os.path.islink(of_node) and os.path.realpath(of_node) == os.path.realpath(target)
+    return of_node.is_symlink() and of_node.resolve() == target.resolve()
 
 
-def _resolve_phandle(dt_base: str, phandle: int) -> str:
-    for root, dirs, _files in os.walk(dt_base):
+def _resolve_phandle(dt_base: Path, phandle: int) -> Path:
+    for root, dirs, _files in dt_base.walk():
         dirs.sort()
-        phandle_path = os.path.join(root, "phandle")
-        if os.path.isfile(phandle_path) and _read_u32(phandle_path) == phandle:
-            return "/" + os.path.relpath(root, dt_base)
+        phandle_path = root / "phandle"
+        if phandle_path.is_file() and _read_u32(phandle_path) == phandle:
+            return root
 
     raise DeviceTreeError(f"no device tree node with phandle {phandle}")
 
 
-def _read_dt_cells(node_path: str, prop_name: str) -> tuple:
+def _read_dt_cells(node_path: Path, prop_name: str) -> tuple:
     data = _read_property_bytes(node_path, prop_name)
     if len(data) % 4 != 0:
         raise DeviceTreeError(f"property {prop_name} in {node_path} is not a whole number of cells")
     return struct.unpack(f">{len(data) // 4}I", data)
 
 
-def _read_dt_u32(node_path: str, prop_name: str):
-    prop_path = os.path.join(node_path, prop_name)
-    if not os.path.isfile(prop_path):
+def _read_dt_u32(node_path: Path, prop_name: str):
+    prop_path = node_path / prop_name
+    if not prop_path.is_file():
         return None
     return _read_u32(prop_path)
 
 
-def _read_u32(path: str) -> int:
-    with open(path, "rb") as prop_file:
+def _read_u32(path: Path) -> int:
+    with path.open("rb") as prop_file:
         data = prop_file.read(4)
     return struct.unpack(">I", data)[0]
 
 
-def _read_dt_string(node_path: str, prop_name: str):
-    prop_path = os.path.join(node_path, prop_name)
-    if not os.path.isfile(prop_path):
+def _read_dt_string(node_path: Path, prop_name: str):
+    prop_path = node_path / prop_name
+    if not prop_path.is_file():
         return None
-    with open(prop_path, "rb") as prop_file:
-        return prop_file.read().rstrip(b"\x00").decode("ascii")
+    return prop_path.read_bytes().rstrip(b"\x00").decode("ascii")
 
 
-def _read_property_bytes(node_path: str, prop_name: str) -> bytes:
-    prop_path = os.path.join(node_path, prop_name)
-    if not os.path.isfile(prop_path):
+def _read_property_bytes(node_path: Path, prop_name: str) -> bytes:
+    prop_path = node_path / prop_name
+    if not prop_path.is_file():
         raise DeviceTreeError(f"property '{prop_name}' not found in {node_path}")
-    with open(prop_path, "rb") as prop_file:
-        return prop_file.read()
+    return prop_path.read_bytes()

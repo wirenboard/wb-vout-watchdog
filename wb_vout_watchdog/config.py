@@ -1,7 +1,6 @@
 import json
 from dataclasses import dataclass
 from numbers import Number
-from typing import Any
 
 from wb_vout_watchdog.power_logic import PowerThresholds
 
@@ -35,24 +34,20 @@ def load_config(path: str) -> Config:
     raw = _read_json(path)
 
     thresholds = PowerThresholds(
-        alarm_threshold_v=_get_number(raw, "alarm_threshold_v", DEFAULT_ALARM_THRESHOLD_V, min_value=0.0),
-        min_low_voltage_duration_s=_get_number(
-            raw, "min_low_voltage_duration_s", DEFAULT_MIN_LOW_VOLTAGE_DURATION_S, min_value=0.0
+        alarm_threshold_v=_non_negative_number(raw, "alarm_threshold_v", DEFAULT_ALARM_THRESHOLD_V),
+        min_low_voltage_duration_s=_non_negative_number(
+            raw, "min_low_voltage_duration_s", DEFAULT_MIN_LOW_VOLTAGE_DURATION_S
         ),
-        battery_backup_threshold_v=_get_number(
-            raw, "battery_backup_threshold_v", DEFAULT_BATTERY_BACKUP_THRESHOLD_V, min_value=0.0
+        battery_backup_threshold_v=_non_negative_number(
+            raw, "battery_backup_threshold_v", DEFAULT_BATTERY_BACKUP_THRESHOLD_V
         ),
     )
 
     config = Config(
         thresholds=thresholds,
-        adc_poll_period_s=_get_number(
-            raw, "adc_poll_period_s", DEFAULT_ADC_POLL_PERIOD_S, min_value=0.0, exclusive_min=True
-        ),
-        adc_error_threshold=_get_int(raw, "adc_error_threshold", DEFAULT_ADC_ERROR_THRESHOLD, min_value=1),
-        heartbeat_period_s=_get_number(
-            raw, "heartbeat_period_s", DEFAULT_HEARTBEAT_PERIOD_S, min_value=0.0, exclusive_min=True
-        ),
+        adc_poll_period_s=_positive_number(raw, "adc_poll_period_s", DEFAULT_ADC_POLL_PERIOD_S),
+        adc_error_threshold=_positive_int(raw, "adc_error_threshold", DEFAULT_ADC_ERROR_THRESHOLD),
+        heartbeat_period_s=_positive_number(raw, "heartbeat_period_s", DEFAULT_HEARTBEAT_PERIOD_S),
     )
 
     _validate_cross_fields(thresholds)
@@ -85,37 +80,34 @@ def _validate_cross_fields(thresholds: PowerThresholds) -> None:
         raise ConfigError("battery_backup_threshold_v must be 0 or less than alarm_threshold_v")
 
 
-def _get_number(
-    raw: dict,
-    key: str,
-    default: float,
-    min_value: float = None,
-    exclusive_min: bool = False,
-) -> float:
-    value = _get_value(raw, key, default, Number)
-    if min_value is not None:
-        if exclusive_min and value <= min_value:
-            raise ConfigError(f"'{key}' must be greater than {min_value}")
-        if not exclusive_min and value < min_value:
-            raise ConfigError(f"'{key}' must be at least {min_value}")
+def _number(raw: dict, key: str, default: float) -> float:
+    """Read `key` as a float, falling back to `default` when absent. `bool` is a subclass of
+    `int`, so reject it explicitly — otherwise JSON `true`/`false` would pass as 1.0/0.0."""
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, Number):
+        raise ConfigError(f"'{key}' must be a number")
     return float(value)
 
 
-def _get_int(raw: dict, key: str, default: int, min_value: int = None) -> int:
-    value = _get_value(raw, key, default, int)
-    if min_value is not None and value < min_value:
-        raise ConfigError(f"'{key}' must be at least {min_value}")
+def _non_negative_number(raw: dict, key: str, default: float) -> float:
+    value = _number(raw, key, default)
+    if value < 0:
+        raise ConfigError(f"'{key}' must not be negative")
     return value
 
 
-def _get_value(raw: dict, key: str, default: Any, expected_type: type) -> Any:
-    if key not in raw:
-        return default
+def _positive_number(raw: dict, key: str, default: float) -> float:
+    value = _number(raw, key, default)
+    if value <= 0:
+        raise ConfigError(f"'{key}' must be greater than 0")
+    return value
 
-    value = raw[key]
-    # bool is a subclass of int in Python; reject it explicitly so `true`/`false` in the
-    # config JSON isn't silently accepted as 0/1 for a numeric field.
-    if isinstance(value, bool) or not isinstance(value, expected_type):
-        raise ConfigError(f"'{key}' must be of type {expected_type.__name__}")
 
+def _positive_int(raw: dict, key: str, default: int) -> int:
+    """Read `key` as an int >= 1. `bool` is a subclass of `int`, so reject it explicitly."""
+    value = raw.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"'{key}' must be an integer")
+    if value < 1:
+        raise ConfigError(f"'{key}' must be at least 1")
     return value
