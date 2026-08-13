@@ -21,10 +21,10 @@ Use Python 3.13.5 — matches the target platform (Debian 13 / trixie).
 The script builds a self-contained `.venv` with Python 3.13.5 bundled inside
 (`.venv/bundle/`), so the same `.venv` works both on the host and inside the
 agent-vm (which bind-mount the project at the same absolute path but have
-different `$HOME`). It is idempotent — safe to rerun to sync dependencies. The
-venv is created with `--system-site-packages` so `gpio.py` can see `gpiod`,
-which comes from the apt package `python3-libgpiod` (`sudo apt install
-python3-libgpiod`) — there is no pip-installable equivalent.
+different `$HOME`). It is idempotent — safe to rerun to sync dependencies. No
+apt packages are needed: every dependency is pinned in `requirements*.txt`, and
+the Vout GPIO line is driven straight through the kernel's character-device
+ioctls from the standard library (`gpio_cdev.py`), not through libgpiod.
 
 Always use tools from `.venv/bin/...`.
 

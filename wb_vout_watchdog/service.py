@@ -48,6 +48,18 @@ class SystemctlAction(Enum):
     STOP = "stop"
     START = "start"
 
+    @property
+    def argv(self) -> list[str]:
+        """`start` is issued from inside this service's own startup, and the unit is ordered
+        `Before=wb-mqtt-gpio.service` -- so a blocking start job cannot run until this service is
+        ready, and would only sit there until the timeout. `--no-block` queues it instead: systemd
+        runs it the moment we signal readiness. Stopping stays synchronous, because the retry needs
+        the line actually released, not a queued intention to release it.
+        """
+        if self is SystemctlAction.START:
+            return ["systemctl", "--no-block", self.value, CONFLICTING_GPIO_SERVICE]
+        return ["systemctl", self.value, CONFLICTING_GPIO_SERVICE]
+
 
 def capture_vout_line(gpio: VoutGpio) -> None:
     """Capture the Vout line, recovering once from a lost startup race with wb-mqtt-gpio.
@@ -74,11 +86,7 @@ def capture_vout_line(gpio: VoutGpio) -> None:
 
 def _systemctl_conflicting_gpio_service(action: SystemctlAction) -> None:
     try:
-        subprocess.run(
-            ["systemctl", action.value, CONFLICTING_GPIO_SERVICE],
-            timeout=CONFLICTING_GPIO_SERVICE_SYSTEMCTL_TIMEOUT_S,
-            check=True,
-        )
+        subprocess.run(action.argv, timeout=CONFLICTING_GPIO_SERVICE_SYSTEMCTL_TIMEOUT_S, check=True)
     except (OSError, subprocess.SubprocessError) as exc:
         logging.warning("could not %s %s: %s", action.value, CONFLICTING_GPIO_SERVICE, exc)
 

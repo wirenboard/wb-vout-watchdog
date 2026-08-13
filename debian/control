@@ -7,8 +7,7 @@ Build-Depends: debhelper-compat (= 13),
                dh-python,
                python3-setuptools,
                python3-pytest,
-               python3-paho-mqtt,
-               python3-libgpiod
+               python3-paho-mqtt
 Standards-Version: 4.6.1
 Rules-Requires-Root: no
 Homepage: https://github.com/wirenboard/wb-vout-watchdog
@@ -17,8 +16,7 @@ Package: wb-vout-watchdog
 Architecture: all
 Depends: ${misc:Depends},
          ${python3:Depends},
-         python3-paho-mqtt,
-         python3-libgpiod
+         python3-paho-mqtt
 Description: Wiren Board Vout undervoltage watchdog
  Supervises input power (Vin) and gates the switched Vout line on WB
  controllers. Cuts Vout on a dangerous undervoltage and requires a fresh
