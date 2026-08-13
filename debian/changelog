@@ -1,0 +1,5 @@
+wb-vout-watchdog (1.0.0) stable; urgency=medium
+
+  * Initial release.
+
+ -- Petr Krasnoshchekov <petr.krasnoshchekov@wirenboard.com>  Thu, 16 Jul 2026 00:00:00 +0000

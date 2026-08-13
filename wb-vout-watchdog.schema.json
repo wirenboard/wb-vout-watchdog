@@ -1,0 +1,65 @@
+{
+    "$schema": "http://json-schema.org/draft-04/schema#",
+    "type": "object",
+    "title": "WB Vout Watchdog",
+    "description": "Configuration schema for wb-vout-watchdog",
+    "configFile": {
+        "path": "/etc/wb-vout-watchdog.conf",
+        "service": "wb-vout-watchdog"
+    },
+    "properties": {
+        "alarm_threshold_v": {
+            "type": "number",
+            "title": "Alarm threshold (V)",
+            "description": "Vin below this is a dangerous undervoltage once it persists for the minimum low-voltage duration; the undervoltage flag latches until an external enable_vout confirmation",
+            "default": 20.0,
+            "minimum": 0,
+            "propertyOrder": 1
+        },
+        "min_low_voltage_duration_s": {
+            "type": "number",
+            "title": "Minimum low-voltage duration (s)",
+            "description": "Minimum time Vin must stay below the alarm threshold before it counts as an undervoltage",
+            "default": 5.0,
+            "minimum": 0,
+            "propertyOrder": 2
+        },
+        "battery_backup_threshold_v": {
+            "type": "number",
+            "title": "Battery backup threshold (V)",
+            "description": "Vin below this means the controller is running on WBMZ-BATTERY backup power: Vout is left untouched and the undervoltage flag is not raised. 0 disables this exception",
+            "default": 11.0,
+            "minimum": 0,
+            "propertyOrder": 3
+        },
+        "adc_poll_period_s": {
+            "type": "number",
+            "title": "ADC poll period (s)",
+            "description": "How often Vin is read from the ADC",
+            "default": 1.0,
+            "minimum": 0,
+            "propertyOrder": 4
+        },
+        "adc_error_threshold": {
+            "type": "integer",
+            "title": "ADC error threshold",
+            "description": "Number of consecutive failed Vin reads treated as an undervoltage (fail-safe)",
+            "default": 3,
+            "minimum": 1,
+            "propertyOrder": 5
+        },
+        "heartbeat_period_s": {
+            "type": "number",
+            "title": "Heartbeat period (s)",
+            "description": "How often the heartbeat control is published",
+            "default": 10.0,
+            "minimum": 0,
+            "propertyOrder": 6
+        }
+    },
+    "required": [],
+    "options": {
+        "disable_edit_json": true,
+        "disable_properties": true
+    }
+}
