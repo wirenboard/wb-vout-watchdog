@@ -11,12 +11,6 @@
 # during subsequent uv operations (e.g. uv pip install), which would undo a
 # directory copy placed there.
 #
-# The venv is created with --system-site-packages: gpio.py needs `gpiod`,
-# which comes from the apt package python3-libgpiod (compiled against the
-# system libgpiod) — there is no pip-installable equivalent to pin in
-# requirements.txt. Install it on the host with:
-#   sudo apt install python3-libgpiod
-#
 # Idempotent: skips the interpreter bootstrap if .venv/bundle/bin/python3.13
 # already exists; always (re)installs requirements with --link-mode=copy.
 
@@ -41,7 +35,7 @@ if [ ! -x .venv/bundle/bin/python3.13 ] || [ -L .venv/bundle ]; then
     PY_BIN="$(readlink -f "$(uv python find "$PY_VERSION_REQUIRED")")"
     PY_ROOT="$(dirname "$(dirname "$PY_BIN")")"
 
-    uv venv --python "$PY_BIN" --seed --system-site-packages .venv
+    uv venv --python "$PY_BIN" --seed .venv
 
     cp -a "$PY_ROOT" .venv/bundle
 
@@ -53,10 +47,14 @@ if [ ! -x .venv/bundle/bin/python3.13 ] || [ -L .venv/bundle ]; then
     PYVER="$("$PY_BIN" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
     cat > .venv/pyvenv.cfg <<EOF
 home = $PROJ/.venv/bundle/bin
-include-system-site-packages = true
+include-system-site-packages = false
 version = $PYVER
 EOF
 fi
+
+# The block above runs only on a fresh bootstrap, so a venv created before the switch to an
+# isolated one keeps seeing site-packages until this converges it.
+sed -i 's/^include-system-site-packages = true$/include-system-site-packages = false/' .venv/pyvenv.cfg
 
 UV_LINK_MODE=copy uv pip install \
     --python .venv/bin/python \

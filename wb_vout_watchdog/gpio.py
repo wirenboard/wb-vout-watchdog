@@ -1,9 +1,7 @@
 import errno
 import logging
 
-import gpiod
-from gpiod.line import Direction, Value
-
+from wb_vout_watchdog import gpio_cdev
 from wb_vout_watchdog.devicetree import VoutGpioLine
 
 CONSUMER = "wb-vout-watchdog"
@@ -26,48 +24,45 @@ class VoutGpio:
     def capture(self) -> bool:
         """Take exclusive control of the line and return the physical state observed before that.
 
-        To avoid a glitch, the line is first requested `AS_IS` (direction untouched) purely to
-        read its current value, and only then reconfigured as an output with that same value as
-        `output_value` -- so the physical pin level never changes across the switch to output.
+        To avoid a glitch, the line is first requested as-is (direction untouched) purely to read
+        its current value, and only then reconfigured as an output driving that same value -- the
+        pin level never changes, and the line is never released in between.
+
+        A failure of those two steps hands the line back at once and leaves the object uncaptured,
+        so the caller's retry starts from a free line instead of racing our own hold.
         """
         try:
-            self._request = gpiod.request_lines(
+            request = gpio_cdev.request_line(
                 self._line.chip_path,
+                self._line.offset,
                 consumer=self._consumer,
-                config={
-                    self._line.offset: gpiod.LineSettings(
-                        direction=Direction.AS_IS,
-                        active_low=self._line.active_low,
-                    )
-                },
+                active_low=self._line.active_low,
             )
         except OSError as exc:
             if exc.errno == errno.EBUSY:
                 raise GpioBusyError(f"Vout GPIO line is busy: {exc}") from exc
             raise GpioError(f"cannot capture Vout GPIO line: {exc}") from exc
 
-        value = self._request.get_value(self._line.offset)
-        self._request.reconfigure_lines(
-            {
-                self._line.offset: gpiod.LineSettings(
-                    direction=Direction.OUTPUT,
-                    active_low=self._line.active_low,
-                    output_value=value,
-                )
-            }
-        )
+        try:
+            value = request.get_value()
+            request.reconfigure_as_output(value)
+        except OSError as exc:
+            request.release()
+            raise GpioError(f"cannot drive the captured Vout GPIO line: {exc}") from exc
+
+        self._request = request
         logging.debug(
             "captured Vout line %s offset %d, observed level=%s",
             self._line.chip_path,
             self._line.offset,
-            bool(value),
+            value.name,
         )
-        return bool(value)
+        return value is gpio_cdev.Value.ACTIVE
 
     def set_enabled(self, enabled: bool) -> None:
         """Drive the line on or off."""
         self._check_captured()
-        self._request.set_value(self._line.offset, Value.ACTIVE if enabled else Value.INACTIVE)
+        self._request.set_value(gpio_cdev.Value.ACTIVE if enabled else gpio_cdev.Value.INACTIVE)
 
     def close(self) -> None:
         """Release the line request. Vout is left as-is; this does not turn it off."""

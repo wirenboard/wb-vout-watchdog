@@ -1,3 +1,13 @@
+wb-vout-watchdog (1.1.0) stable; urgency=medium
+
+  * Drop the python3-libgpiod dependency: the Vout line is driven through the
+    kernel's GPIO character device (v2 uAPI) straight from the standard library,
+    so the package installs offline on images that do not carry it.
+  * Start wb-mqtt-gpio back with --no-block after a lost race for the line, so
+    the recovery no longer waits out a systemd ordering deadlock.
+
+ -- Petr Krasnoshchekov <petr.krasnoshchekov@wirenboard.com>  Thu, 13 Aug 2026 12:40:39 +0000
+
 wb-vout-watchdog (1.0.0) stable; urgency=medium
 
   * Initial release.

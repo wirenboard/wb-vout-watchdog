@@ -1,6 +1,7 @@
 """Integration-style tests for `Service`: wires the real `PowerLogic`/`VinReader`/`VoutGpio`/
 `MqttDevice` together, with fakes only at the true I/O boundaries (device tree/sysfs via real
-temp files, `gpiod.request_lines` and `paho.mqtt.client.Client` via the fakes in conftest.py).
+temp files, the GPIO chip's `os.open`/`fcntl.ioctl` and `paho.mqtt.client.Client` via the fakes
+in conftest.py).
 No real broker or GPIO chip is involved: an "emulated sysfs + local broker" integration style,
 adapted to this project's dependency-injection seams instead of spawning a real mosquitto
 (not a build dependency of this package).
@@ -12,33 +13,29 @@ and by driving the fake MQTT client's callbacks (which are simply the public
 reaching into `Service`'s own attributes.
 """
 
-import errno
 import logging
 import socket
 import subprocess
 import threading
 import time
 
-import gpiod
 import pytest
-from gpiod.line import Value
 
 import wb_vout_watchdog.devicetree as devicetree_module
 import wb_vout_watchdog.mqtt as mqtt_module
 import wb_vout_watchdog.service as service_module
 from tests.conftest import (
-    FakeGpioLineRequest,
+    BusyBehaviour,
     FakeMessage,
     FakeMqttClient,
     FakeReasonCode,
     latest_meta,
-    make_fake_request_lines,
-    make_fake_request_lines_busy_once,
-    make_fake_request_lines_set_failing,
+    patch_gpio_chip,
 )
 from wb_vout_watchdog.config import Config
 from wb_vout_watchdog.devicetree import VinChannel, VoutGpioLine
 from wb_vout_watchdog.gpio import GpioBusyError, VoutGpio
+from wb_vout_watchdog.gpio_cdev import Value
 from wb_vout_watchdog.mqtt import DEVICE_TOPIC_PREFIX, Control, command_topic
 from wb_vout_watchdog.power_logic import PowerThresholds
 from wb_vout_watchdog.service import (
@@ -121,13 +118,19 @@ def _vout_line_fixture():
     return VoutGpioLine(chip_path="/dev/gpiochip3", offset=5, active_low=False)
 
 
+@pytest.fixture(name="gpio_chip")
+def _gpio_chip_fixture(monkeypatch):
+    """The Vout line as the service finds it on a normal start: free to capture and off."""
+    return patch_gpio_chip(monkeypatch, initial_value=Value.INACTIVE)
+
+
 @pytest.fixture(name="service")
-def _service_fixture(monkeypatch, tmp_path, vin_channel, vout_line):
+def _service_fixture(monkeypatch, tmp_path, vin_channel, vout_line, gpio_chip):
+    del gpio_chip  # requested for the patching alone; tests that inspect it ask for it too
     channel, _raw_path = vin_channel
     monkeypatch.setattr(devicetree_module, "find_vin_channel", lambda: channel)
     monkeypatch.setattr(devicetree_module, "find_vout_gpio_line", lambda: vout_line)
     monkeypatch.setattr(mqtt_module.mqtt, "Client", FakeMqttClient)
-    monkeypatch.setattr(gpiod, "request_lines", make_fake_request_lines(Value.INACTIVE))
 
     # No marker file under `tmp_path` unless a test creates one -- same as a fresh install with
     # no prior undervoltage state (see TestUndervoltageMarkerPersistence).
@@ -135,11 +138,11 @@ def _service_fixture(monkeypatch, tmp_path, vin_channel, vout_line):
 
 
 @pytest.fixture(name="running_service")
-def _running_service_fixture(service):
+def _running_service_fixture(service, gpio_chip):
     thread = threading.Thread(target=service.run, daemon=True)
     thread.start()
     wait_until(lambda: latest_value(FakeMqttClient.instances[-1], "vin") is not None)
-    yield service, FakeMqttClient.instances[-1], FakeGpioLineRequest.instances[-1]
+    yield service, FakeMqttClient.instances[-1], gpio_chip
     service.stop()
     thread.join(timeout=WAIT_TIMEOUT_S)
 
@@ -148,7 +151,7 @@ class TestStartup:
     def test_line_found_off_is_left_off_and_full_state_is_published(self, running_service):
         _service, fake_client, fake_gpio = running_service
 
-        assert fake_gpio.value == Value.INACTIVE
+        assert fake_gpio.value is Value.INACTIVE
         assert latest_value(fake_client, "undervoltage") == "0"
         assert latest_value(fake_client, "V_OUT") == "0"
         assert latest_meta(fake_client, Control.VOUT)["readonly"] is False
@@ -163,13 +166,13 @@ class TestStartup:
         monkeypatch.setattr(devicetree_module, "find_vin_channel", lambda: channel)
         monkeypatch.setattr(devicetree_module, "find_vout_gpio_line", lambda: vout_line)
         monkeypatch.setattr(mqtt_module.mqtt, "Client", FakeMqttClient)
-        monkeypatch.setattr(gpiod, "request_lines", make_fake_request_lines(Value.ACTIVE))
+        chip = patch_gpio_chip(monkeypatch, initial_value=Value.ACTIVE)
 
         service = Service(FAST_CONFIG, state_directory=str(tmp_path))
         thread = threading.Thread(target=service.run, daemon=True)
         thread.start()
         try:
-            wait_until(lambda: FakeGpioLineRequest.instances[-1].value == Value.INACTIVE)
+            wait_until(lambda: chip.value is Value.INACTIVE)
             fake_client = FakeMqttClient.instances[-1]
             assert latest_value(fake_client, "V_OUT") == "0"
             assert latest_value(fake_client, "undervoltage") == "0"  # not a Vin-based alarm
@@ -177,7 +180,7 @@ class TestStartup:
             service.stop()
             thread.join(timeout=WAIT_TIMEOUT_S)
 
-    def test_start_with_vout_state_file_restores_vout_on(self, service, tmp_path):
+    def test_start_with_vout_state_file_restores_vout_on(self, service, gpio_chip, tmp_path):
         """Flag down and a persisted Vout state file present: startup restores Vout on (like
         wb-mqtt-gpio's load_previous_state), driving the line on without a fresh command. The
         `service` fixture points `Service` at this `tmp_path` with a line captured off and no
@@ -188,13 +191,15 @@ class TestStartup:
         thread.start()
         try:
             wait_until(lambda: latest_value(FakeMqttClient.instances[-1], "V_OUT") == "1")
-            assert FakeGpioLineRequest.instances[-1].value == Value.ACTIVE
+            assert gpio_chip.value is Value.ACTIVE
             assert latest_value(FakeMqttClient.instances[-1], "undervoltage") == "0"
         finally:
             service.stop()
             thread.join(timeout=WAIT_TIMEOUT_S)
 
-    def test_start_with_flag_and_vout_both_persisted_does_not_re_power_vout(self, service, tmp_path):
+    def test_start_with_flag_and_vout_both_persisted_does_not_re_power_vout(
+        self, service, gpio_chip, tmp_path
+    ):
         """After a latched alarm, a restart must not re-power Vout even though the vout state
         file says it was on: the raised flag forces the line off and keeps it blocked."""
         (tmp_path / UNDERVOLTAGE_MARKER_FILENAME).write_text("")
@@ -205,7 +210,7 @@ class TestStartup:
         try:
             wait_until(lambda: latest_value(FakeMqttClient.instances[-1], "undervoltage") == "1")
             time.sleep(NO_REACTION_WINDOW_S)
-            assert FakeGpioLineRequest.instances[-1].value == Value.INACTIVE
+            assert gpio_chip.value is Value.INACTIVE
             assert latest_value(FakeMqttClient.instances[-1], "V_OUT") == "0"
         finally:
             service.stop()
@@ -222,15 +227,13 @@ class TestStartup:
         monkeypatch.setattr(devicetree_module, "find_vin_channel", lambda: channel)
         monkeypatch.setattr(devicetree_module, "find_vout_gpio_line", lambda: vout_line)
         monkeypatch.setattr(mqtt_module.mqtt, "Client", FakeMqttClient)
-        monkeypatch.setattr(
-            gpiod, "request_lines", make_fake_request_lines_set_failing(Value.INACTIVE, set_failures=1)
-        )
+        chip = patch_gpio_chip(monkeypatch, initial_value=Value.INACTIVE, set_failures=1)
 
         service = Service(FAST_CONFIG, state_directory=str(tmp_path))
         thread = threading.Thread(target=service.run, daemon=True)
         thread.start()
         try:
-            wait_until(lambda: FakeGpioLineRequest.instances[-1].value == Value.ACTIVE)
+            wait_until(lambda: chip.value is Value.ACTIVE)
             assert thread.is_alive()
         finally:
             service.stop()
@@ -247,21 +250,21 @@ class TestFullCycle:
 
         set_vin_volts(raw_path, 15.0)  # normal-zone low voltage: between battery and alarm thresholds
         wait_until(
-            lambda: fake_gpio.value == Value.INACTIVE and latest_value(fake_client, "undervoltage") == "1"
+            lambda: fake_gpio.value is Value.INACTIVE and latest_value(fake_client, "undervoltage") == "1"
         )
 
         set_vin_volts(raw_path, 24.0)  # Vin recovers: must not clear anything by itself
         wait_until(lambda: latest_value(fake_client, "vin") == "24.00")
         time.sleep(NO_REACTION_WINDOW_S)
         assert latest_value(fake_client, "undervoltage") == "1"  # the flag latches
-        assert fake_gpio.value == Value.INACTIVE
+        assert fake_gpio.value is Value.INACTIVE
 
         send_command(fake_client, Control.ENABLE_VOUT, b"1")
         wait_until(lambda: latest_value(fake_client, "undervoltage") == "0")
-        assert fake_gpio.value == Value.INACTIVE  # unlocking never enables Vout by itself
+        assert fake_gpio.value is Value.INACTIVE  # unlocking never enables Vout by itself
 
         send_command(fake_client, Control.VOUT, b"1")
-        wait_until(lambda: fake_gpio.value == Value.ACTIVE)
+        wait_until(lambda: fake_gpio.value is Value.ACTIVE)
         assert latest_value(fake_client, "V_OUT") == "1"
 
     def test_vout_write_is_ignored_while_the_flag_is_up(self, running_service, vin_channel):
@@ -276,7 +279,7 @@ class TestFullCycle:
         send_command(fake_client, Control.VOUT, b"1")
         time.sleep(NO_REACTION_WINDOW_S)
 
-        assert fake_gpio.value == Value.INACTIVE
+        assert fake_gpio.value is Value.INACTIVE
         assert latest_value(fake_client, "V_OUT") == "0"
 
     def test_unlock_without_a_raised_flag_is_a_no_op(self, running_service):
@@ -287,7 +290,7 @@ class TestFullCycle:
         send_command(fake_client, Control.ENABLE_VOUT, b"1")
         time.sleep(NO_REACTION_WINDOW_S)
 
-        assert fake_gpio.value == Value.INACTIVE
+        assert fake_gpio.value is Value.INACTIVE
         assert latest_value(fake_client, "V_OUT") == "0"
         assert latest_value(fake_client, "undervoltage") == "0"
 
@@ -317,7 +320,7 @@ class TestFullCycle:
         wait_until(lambda: latest_value(fake_client, "vin") == "5.00")
         time.sleep(NO_REACTION_WINDOW_S)
 
-        assert fake_gpio.value == Value.INACTIVE  # unchanged (it started off, and stays off)
+        assert fake_gpio.value is Value.INACTIVE  # unchanged (it started off, and stays off)
         assert latest_value(fake_client, "undervoltage") == "0"
 
 
@@ -413,7 +416,7 @@ class TestUndervoltageMarkerPersistence:
         monkeypatch.setattr(devicetree_module, "find_vin_channel", lambda: channel)
         monkeypatch.setattr(devicetree_module, "find_vout_gpio_line", lambda: vout_line)
         monkeypatch.setattr(mqtt_module.mqtt, "Client", FakeMqttClient)
-        monkeypatch.setattr(gpiod, "request_lines", make_fake_request_lines(Value.INACTIVE))
+        patch_gpio_chip(monkeypatch, initial_value=Value.INACTIVE)
         caplog.set_level(logging.WARNING)
 
         # "missing" is never created next to raw_path, so the marker path's parent directory
@@ -440,16 +443,21 @@ class TestBusyLineRecovery:
     ):
         """First capture attempt hits EBUSY; the conflicting service is stopped, the retried
         capture succeeds, and the service is started back -- exactly one stop followed by
-        exactly one start."""
-        monkeypatch.setattr(gpiod, "request_lines", make_fake_request_lines_busy_once(Value.INACTIVE))
+        exactly one start.
+
+        The stop blocks (the retry needs the line released); the start does not, because it is
+        issued from inside this service's own startup and the unit is ordered before
+        wb-mqtt-gpio -- a blocking start job would wait for a readiness this call is holding up.
+        """
+        chip = patch_gpio_chip(monkeypatch, initial_value=Value.INACTIVE, busy=BusyBehaviour.FIRST_ATTEMPT)
 
         capture_vout_line(VoutGpio(vout_line))
 
         assert subprocess_commands == [
             ["systemctl", "stop", "wb-mqtt-gpio.service"],
-            ["systemctl", "start", "wb-mqtt-gpio.service"],
+            ["systemctl", "--no-block", "start", "wb-mqtt-gpio.service"],
         ]
-        assert len(FakeGpioLineRequest.instances) == 1  # the one successful (retried) capture
+        assert len(chip.captures) == 1  # the one successful (retried) capture
 
     def test_line_still_busy_after_the_stop_is_fatal_but_the_driver_is_started_back(
         self, monkeypatch, subprocess_commands, vout_line
@@ -457,18 +465,14 @@ class TestBusyLineRecovery:
         """If the retry hits EBUSY again, the error propagates (fatal startup error, systemd
         takes over) -- but wb-mqtt-gpio is still started back, so its other channels keep
         working while this service sits in failed/restarting."""
-
-        def request_lines_always_busy(*_args, **_kwargs):
-            raise OSError(errno.EBUSY, "Device or resource busy")
-
-        monkeypatch.setattr(gpiod, "request_lines", request_lines_always_busy)
+        patch_gpio_chip(monkeypatch, initial_value=Value.INACTIVE, busy=BusyBehaviour.ALWAYS)
 
         with pytest.raises(GpioBusyError):
             capture_vout_line(VoutGpio(vout_line))
 
         assert subprocess_commands == [
             ["systemctl", "stop", "wb-mqtt-gpio.service"],
-            ["systemctl", "start", "wb-mqtt-gpio.service"],
+            ["systemctl", "--no-block", "start", "wb-mqtt-gpio.service"],
         ]
 
     def test_failed_stop_is_logged_and_the_capture_is_still_retried(self, monkeypatch, caplog, vout_line):
@@ -480,13 +484,13 @@ class TestBusyLineRecovery:
             del kwargs
             raise subprocess.TimeoutExpired(cmd=command, timeout=1.0)
 
-        monkeypatch.setattr(gpiod, "request_lines", make_fake_request_lines_busy_once(Value.ACTIVE))
+        chip = patch_gpio_chip(monkeypatch, initial_value=Value.ACTIVE, busy=BusyBehaviour.FIRST_ATTEMPT)
         monkeypatch.setattr(service_module.subprocess, "run", run_times_out)
         caplog.set_level(logging.WARNING)
 
         capture_vout_line(VoutGpio(vout_line))
 
-        assert len(FakeGpioLineRequest.instances) == 1  # the retry captured the line
+        assert len(chip.captures) == 1  # the retry captured the line
         assert "could not stop wb-mqtt-gpio.service" in caplog.text
 
 

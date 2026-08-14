@@ -7,21 +7,26 @@
   socket. It self-registers into `FakeMqttClient.instances` on construction, so tests can get
   hold of the specific instance a production object created without reaching into that
   object's private attributes.
-- Shared assertion/setup helpers used by more than one test module (`latest_meta`, the
-  busy-once `gpiod.request_lines` factory, the `subprocess_commands` recorder fixture).
+- `FakeGpioChip`: stands in for a real GPIO chip behind the `os.open`/`fcntl.ioctl` pair that
+  `gpio_cdev.py` uses, so tests exercise the real ioctl encoding without a chip.
+- Shared assertion/setup helpers used by more than one test module (`latest_meta`,
+  `patch_gpio_chip`, the `subprocess_commands` recorder fixture).
 """
 
+import enum
 import errno
+import fcntl
 import json
 import os
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, Optional
 
 import pytest
 
 import wb_vout_watchdog.service as service_module
+from wb_vout_watchdog import gpio_cdev
 from wb_vout_watchdog.mqtt import DEVICE_TOPIC_PREFIX, Control
 
 
@@ -109,82 +114,204 @@ def _reset_fake_mqtt_client_registry():
     FakeMqttClient.instances = []
 
 
+CHIP_PATH_PREFIX = "/dev/gpiochip"
+
+# Captured before any test patches them, so the fake chip can still reach the real ones -- and so
+# it can pass through everything that is not addressed to it.
+_REAL_OS_OPEN = os.open
+_REAL_IOCTL = fcntl.ioctl
+
+
+def _value_of(bits: int) -> gpio_cdev.Value:
+    return gpio_cdev.Value.ACTIVE if bits else gpio_cdev.Value.INACTIVE
+
+
+class BusyBehaviour(enum.Enum):
+    """When a line request gets `EBUSY`. `FIRST_ATTEMPT` is a lost startup race that one stop of
+    wb-mqtt-gpio resolves."""
+
+    NEVER = "never"
+    FIRST_ATTEMPT = "first-attempt"
+    ALWAYS = "always"
+
+
 @dataclass
-class FakeGpioLineRequest:
-    """Stands in for a `gpiod.LineRequest`: tracks the line's value instead of touching real
-    hardware. Self-registers into `instances`, same rationale as `FakeMqttClient`."""
+class ChipFaults:
+    """What the fake chip fails at: a line request answered `EBUSY`, and leading value writes that
+    fail the way a transient error on the off-SoC GPIO controller does."""
 
-    value: object
-    consumer: str = None
-    released: bool = False
-    set_failures: int = 0  # number of leading set_value calls that raise OSError (transient bus)
-
-    instances = []
-
-    def __post_init__(self):
-        FakeGpioLineRequest.instances.append(self)
-
-    def get_value(self, _offset):
-        return self.value
-
-    def reconfigure_lines(self, config):
-        (settings,) = config.values()
-        self.value = settings.output_value
-
-    def set_value(self, _offset, value):
-        if self.set_failures > 0:
-            self.set_failures -= 1
-            raise OSError("simulated GPIO bus error")
-        self.value = value
-
-    def release(self):
-        self.released = True
+    busy: BusyBehaviour = BusyBehaviour.NEVER
+    set_failures: int = 0
 
 
-@pytest.fixture(autouse=True)
-def _reset_fake_gpio_line_request_registry():
-    FakeGpioLineRequest.instances = []
+@dataclass(frozen=True)
+class RecordedCapture:
+    """One `GET_LINE` as the chip received it, plus the descriptor handed back for it."""
+
+    consumer: str
+    offset: int
+    num_lines: int
+    flags: int
+    num_attrs: int
+    fd: int
 
 
-def make_fake_request_lines(initial_value):
-    """Builds a `gpiod.request_lines` replacement that always returns a fresh
-    `FakeGpioLineRequest` starting at `initial_value` (simulating the line's physical state as
-    found by the `AS_IS` read in `VoutGpio.capture()`)."""
-
-    def fake_request_lines(_chip_path, consumer=None, config=None):
-        del config  # unused: the fake always exposes a single, implicit line
-        return FakeGpioLineRequest(value=initial_value, consumer=consumer)
-
-    return fake_request_lines
+@dataclass(frozen=True)
+class RecordedConfig:
+    flags: int
+    num_attrs: int
+    attr_id: int
+    attr_values: int
+    attr_mask: int
 
 
-def make_fake_request_lines_set_failing(initial_value, set_failures):
-    """Like `make_fake_request_lines`, but the returned request's first `set_failures`
-    `set_value` calls raise `OSError` (a transient bus error on the off-SoC GPIO controller) --
-    to exercise the write-retry path in `Service._flush_pending_vout`."""
-
-    def fake_request_lines(_chip_path, consumer=None, config=None):
-        del config
-        return FakeGpioLineRequest(value=initial_value, consumer=consumer, set_failures=set_failures)
-
-    return fake_request_lines
+class ValuesOp(enum.Enum):
+    READ = "read"
+    WRITE = "write"
 
 
-def make_fake_request_lines_busy_once(initial_value):
-    """Like `make_fake_request_lines`, but the first call raises `EBUSY` (the line is held by
-    another process, e.g. wb-mqtt-gpio after a lost startup race) and every later call
-    succeeds -- simulating a race that one stop of the conflicting service resolves."""
+@dataclass(frozen=True)
+class RecordedValues:
+    """One values ioctl as decoded from the wire — the mask says which lines it addresses."""
 
-    calls = []
+    op: ValuesOp
+    bits: int
+    mask: int
 
-    def fake_request_lines(_chip_path, consumer=None, config=None):
-        del config
-        calls.append(consumer)
-        if len(calls) == 1:
+
+@dataclass
+class FakeGpioChip:
+    """Stands in for a GPIO chip behind `os.open`/`fcntl.ioctl`: reads the uAPI structures the
+    client really sends, applies them to an in-memory line value, and records them for assertions.
+
+    Both patched functions are process-wide, so the fake answers only what is addressed to it --
+    chip paths for `open`, its own descriptors for `ioctl` -- and passes everything else to the
+    real function. A chip open and a line request each get a real descriptor (on /dev/null), so
+    `release()` closes a real fd and the fd numbers are unique while they are open.
+    """
+
+    value: gpio_cdev.Value
+    faults: ChipFaults = field(default_factory=ChipFaults)
+    own_fds: set[int] = field(default_factory=set)
+    opened_paths: list[str] = field(default_factory=list)
+    captures: list[RecordedCapture] = field(default_factory=list)
+    configs: list[RecordedConfig] = field(default_factory=list)
+    values_ops: list[RecordedValues] = field(default_factory=list)
+
+    @property
+    def is_output(self) -> bool:
+        """The line drives only once a `SET_CONFIG` says so; as-is until then."""
+        return bool(self.configs and self.configs[-1].flags & gpio_cdev.LineFlag.OUTPUT)
+
+    def open(self, path, flags, *args, **kwargs):
+        if not str(path).startswith(CHIP_PATH_PREFIX):
+            return _REAL_OS_OPEN(path, flags, *args, **kwargs)
+        self.opened_paths.append(str(path))
+        return self._new_fd()
+
+    def ioctl(self, fd, request, *args, **kwargs):
+        """Which descriptor it is decides only whether the call is ours at all: the fake exposes a
+        single line, so beyond that the descriptor adds nothing."""
+        if fd not in self.own_fds:
+            return _REAL_IOCTL(fd, request, *args, **kwargs)
+        if request == gpio_cdev.Ioctl.GET_LINE:
+            return self._get_line(*args)
+        if request == gpio_cdev.Ioctl.SET_CONFIG:
+            return self._set_config(*args)
+        if request == gpio_cdev.Ioctl.GET_VALUES:
+            return self._get_values(*args)
+        if request == gpio_cdev.Ioctl.SET_VALUES:
+            return self._set_values(*args)
+        raise AssertionError(f"unexpected ioctl {request:#x}")
+
+    # --- Private ---
+
+    def _new_fd(self) -> int:
+        fd = _REAL_OS_OPEN(os.devnull, os.O_RDWR)
+        self.own_fds.add(fd)
+        return fd
+
+    def _get_line(self, request):
+        if self.faults.busy is not BusyBehaviour.NEVER:
+            if self.faults.busy is BusyBehaviour.FIRST_ATTEMPT:
+                self.faults.busy = BusyBehaviour.NEVER  # the next attempt finds the line free
             raise OSError(errno.EBUSY, "Device or resource busy")
-        return FakeGpioLineRequest(value=initial_value, consumer=consumer)
 
-    return fake_request_lines
+        fd = self._new_fd()
+        request.fd = fd
+        self.captures.append(
+            RecordedCapture(
+                consumer=request.consumer.decode(),
+                offset=request.offsets[0],
+                num_lines=request.num_lines,
+                flags=request.config.flags,
+                num_attrs=request.config.num_attrs,
+                fd=fd,
+            )
+        )
+        return 0
+
+    def _set_config(self, config):
+        attribute = config.attrs[0]
+        self.configs.append(
+            RecordedConfig(
+                flags=config.flags,
+                num_attrs=config.num_attrs,
+                attr_id=attribute.attr.id,
+                attr_values=attribute.attr.value.values,
+                attr_mask=attribute.mask,
+            )
+        )
+        if config.num_attrs and attribute.attr.id == gpio_cdev.LineAttributeId.OUTPUT_VALUES:
+            self.value = _value_of(attribute.attr.value.values & attribute.mask)
+        elif self.is_output:
+            self.value = gpio_cdev.Value.INACTIVE  # an output without that attribute is driven low
+        return 0
+
+    def _get_values(self, values):
+        self.values_ops.append(RecordedValues(op=ValuesOp.READ, bits=values.bits, mask=values.mask))
+        self._reject_unaddressed(values.mask)
+        values.bits = gpio_cdev.LINE_BIT if self.value is gpio_cdev.Value.ACTIVE else 0
+        return 0
+
+    def _set_values(self, values):
+        self.values_ops.append(RecordedValues(op=ValuesOp.WRITE, bits=values.bits, mask=values.mask))
+        self._reject_unaddressed(values.mask)
+        if not self.is_output:
+            # The kernel refuses to drive a line that is not an output -- so would a stray write
+            # during the glitch-free capture, instead of silently going through.
+            raise OSError(errno.EPERM, "Operation not permitted")
+        if self.faults.set_failures > 0:
+            self.faults.set_failures -= 1
+            raise OSError("simulated GPIO bus error")
+        self.value = _value_of(values.bits & values.mask & gpio_cdev.LINE_BIT)
+        return 0
+
+    @staticmethod
+    def _reject_unaddressed(mask):
+        """A values ioctl whose mask selects no line of the request is `EINVAL` to the kernel —
+        emulated, so a wrong mask fails loudly instead of silently doing nothing."""
+        if not mask & gpio_cdev.LINE_BIT:
+            raise OSError(errno.EINVAL, "Invalid argument")
+
+
+def patch_gpio_chip(
+    monkeypatch,
+    initial_value: gpio_cdev.Value,
+    *,
+    busy: BusyBehaviour = BusyBehaviour.NEVER,
+    set_failures: int = 0,
+) -> FakeGpioChip:
+    """Point the chardev GPIO client at a `FakeGpioChip` for the duration of the test.
+
+    `initial_value` is the line's physical state as found by the as-is read in
+    `VoutGpio.capture()`; `set_failures` is how many leading `set_value` calls raise `OSError`,
+    standing in for a transient error on the off-SoC GPIO controller.
+    """
+    chip = FakeGpioChip(value=initial_value, faults=ChipFaults(busy=busy, set_failures=set_failures))
+    monkeypatch.setattr(gpio_cdev.os, "open", chip.open)
+    monkeypatch.setattr(gpio_cdev.fcntl, "ioctl", chip.ioctl)
+    return chip
 
 
 @pytest.fixture(name="subprocess_commands")
