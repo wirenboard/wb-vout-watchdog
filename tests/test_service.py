@@ -584,3 +584,19 @@ def test_stop_makes_run_return_promptly(service):
     thread.join(timeout=WAIT_TIMEOUT_S)
 
     assert not thread.is_alive()
+
+
+def test_rejected_mqtt_login_stops_the_service_with_login_rejected(service):
+    """The broker rejecting the login (paho's `on_connect` with a "Not authorized" reason code)
+    is final: the run loop must stop on its own, Vout still cleaned up, and report the reason so
+    `main()` can exit with the no-restart code."""
+    thread = threading.Thread(target=service.run, daemon=True)
+    thread.start()
+    wait_until(lambda: latest_value(FakeMqttClient.instances[-1], "vin") is not None)
+    fake_client = FakeMqttClient.instances[-1]
+
+    fake_client.on_connect(fake_client, None, None, FakeReasonCode(is_failure=True, value=135))
+    thread.join(timeout=WAIT_TIMEOUT_S)
+
+    assert not thread.is_alive()
+    assert service.login_rejected is True

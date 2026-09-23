@@ -22,10 +22,20 @@ MOSQUITTO_SOCKET_PATH = "/var/run/mosquitto/mosquitto.sock"
 # stall a systemd stop when the broker is unreachable.
 CLEAR_RETAINED_TIMEOUT_S = 2.0
 
+# MQTT v5 reason codes paho reports for a rejected login (a v3.1.1 CONNACK 4/5 is translated to
+# them): "Bad user name or password" and "Not authorized".
+LOGIN_REJECTED_REASON_CODES = (134, 135)
+
 
 @dataclass(frozen=True)
 class MqttConnected:
     """Pushed onto the event queue on every successful (re)connect to the broker."""
+
+
+@dataclass(frozen=True)
+class MqttLoginRejected:
+    """Pushed onto the event queue when the broker rejects the login: a configuration problem
+    paho would otherwise retry forever."""
 
 
 class Control(Enum):
@@ -110,7 +120,12 @@ class MqttDevice:
         """Delete every retained topic this device owns (device meta, control values and metas,
         the `vin` error flag) by publishing empty retained payloads, so a cleanly stopped
         service doesn't leave a dead device panel in homeui. Must be called while the network
-        loop is still running (i.e. before `stop()`)."""
+        loop is still running (i.e. before `stop()`). Without a connection to the broker it is a
+        no-op that logs an error: the retained topics stay (a stale panel remains in homeui) and
+        the stop still exits with 0, as the service guideline requires."""
+        if not self._client.is_connected():
+            logging.error("MQTT broker is not connected, retained topics cannot be removed")
+            return
         infos = [self._publish_cleared(f"{DEVICE_TOPIC_PREFIX}/meta")]
         for control in Control:
             infos.append(self._publish_cleared(f"{DEVICE_TOPIC_PREFIX}/controls/{control.value}"))
@@ -150,6 +165,8 @@ class MqttDevice:
     def on_connect(self, client, _userdata, _flags, reason_code, _properties=None) -> None:
         if reason_code.is_failure:
             logging.error("MQTT connect failed: %s", reason_code)
+            if reason_code.value in LOGIN_REJECTED_REASON_CODES:
+                self._event_queue.put(MqttLoginRejected())
             return
 
         self._publish_metas()
@@ -178,7 +195,7 @@ class MqttDevice:
         device_meta = json.dumps(
             {"driver": DEVICE_ID, "title": {"en": "Vout Watchdog", "ru": "Сторож Vout"}}, ensure_ascii=False
         )
-        self._client.publish(f"{DEVICE_TOPIC_PREFIX}/meta", device_meta, retain=True, qos=PUBLISH_QOS)
+        self._publish_retained(f"{DEVICE_TOPIC_PREFIX}/meta", device_meta)
         for control in Control:
             self._publish_control_meta(control)
 
@@ -186,17 +203,22 @@ class MqttDevice:
         meta = CONTROL_METAS[control]
         if control is Control.VOUT:
             meta = replace(meta, readonly=self._vout_readonly)
-        topic = f"{DEVICE_TOPIC_PREFIX}/controls/{control.value}/meta"
-        self._client.publish(topic, meta.to_json(), retain=True, qos=PUBLISH_QOS)
+        self._publish_retained(f"{DEVICE_TOPIC_PREFIX}/controls/{control.value}/meta", meta.to_json())
 
     def _publish_cleared(self, topic: str) -> mqtt.MQTTMessageInfo:
         return self._client.publish(topic, None, retain=True, qos=PUBLISH_QOS)
 
     def _publish_control(self, control: Control, value: str) -> None:
-        self._client.publish(
-            f"{DEVICE_TOPIC_PREFIX}/controls/{control.value}", value, retain=True, qos=PUBLISH_QOS
-        )
+        self._publish_retained(f"{DEVICE_TOPIC_PREFIX}/controls/{control.value}", value)
 
     def _publish_vin_meta_error(self, value: str) -> None:
-        topic = f"{DEVICE_TOPIC_PREFIX}/controls/{Control.VIN.value}/meta/error"
-        self._client.publish(topic, value, retain=True, qos=PUBLISH_QOS)
+        self._publish_retained(f"{DEVICE_TOPIC_PREFIX}/controls/{Control.VIN.value}/meta/error", value)
+
+    def _publish_retained(self, topic: str, payload: str) -> None:
+        """Publish only while connected. paho would otherwise queue every Vin sample and
+        heartbeat published while the broker is away and replay the whole backlog on reconnect
+        (mosquitto answers that with "Quota exceeded" and drops the connection again); the
+        current state is republished on every connect anyway (`MqttConnected`)."""
+        if not self._client.is_connected():
+            return
+        self._client.publish(topic, payload, retain=True, qos=PUBLISH_QOS)
