@@ -12,7 +12,7 @@ from wb_vout_watchdog import devicetree
 from wb_vout_watchdog.adc import VinReader
 from wb_vout_watchdog.config import Config
 from wb_vout_watchdog.gpio import GpioBusyError, VoutGpio
-from wb_vout_watchdog.mqtt import MqttConnected, MqttDevice
+from wb_vout_watchdog.mqtt import MqttConnected, MqttDevice, MqttLoginRejected
 from wb_vout_watchdog.power_logic import (
     EnableVoutRequested,
     LogicOutput,
@@ -39,7 +39,14 @@ VOUT_STATE_FILENAME = "vout"
 CONFLICTING_GPIO_SERVICE = "wb-mqtt-gpio.service"
 CONFLICTING_GPIO_SERVICE_SYSTEMCTL_TIMEOUT_S = 30.0
 
-ServiceEvent = Union[EnableVoutRequested, VoutSwitchRequested, MqttConnected]
+ServiceEvent = Union[EnableVoutRequested, VoutSwitchRequested, MqttConnected, MqttLoginRejected]
+
+
+class StopReason(Enum):
+    """Why the main loop stops: a requested stop (SIGTERM/SIGINT) or a login the broker rejected"""
+
+    REQUESTED = "requested"
+    LOGIN_REJECTED = "login rejected"
 
 
 class SystemctlAction(Enum):
@@ -176,12 +183,16 @@ class Service:
             vout_file=PresenceFlagFile(os.path.join(state_directory, VOUT_STATE_FILENAME)),
         )
 
-        self._running = False
+        # Never reset in `run()`: a `stop()` call from another thread racing with startup must
+        # not be clobbered.
+        self._stop_reason: Optional[StopReason] = None
+
+    @property
+    def login_rejected(self) -> bool:
+        """True once the broker has rejected the MQTT login and `run()` has stopped because of it."""
+        return self._stop_reason is StopReason.LOGIN_REJECTED
 
     def run(self) -> None:
-        # Set before the startup sequence (not after) so a `stop()` call from another thread
-        # racing with startup is never clobbered by resetting this back to True afterwards.
-        self._running = True
         logging.debug("config: %r", self._config)
 
         vin_channel = devicetree.find_vin_channel()
@@ -207,7 +218,7 @@ class Service:
         deadlines = LoopDeadlines(adc_poll=time.monotonic(), heartbeat=time.monotonic())
 
         try:
-            while self._running:
+            while self._stop_reason is None:
                 deadlines = self._loop_once(deadlines)
         finally:
             gpio.close()
@@ -215,7 +226,7 @@ class Service:
             self._mqtt.stop()
 
     def stop(self) -> None:
-        self._running = False
+        self._stop_reason = StopReason.REQUESTED
 
     # --- Private ---
 
@@ -255,6 +266,10 @@ class Service:
         logging.debug("event: %r", event)
         if isinstance(event, MqttConnected):
             self._publish_full_state()
+            return
+        if isinstance(event, MqttLoginRejected):
+            # at startup and after a reconnect alike: nothing to retry, let main() exit with 2
+            self._stop_reason = StopReason.LOGIN_REJECTED
             return
 
         now = time.monotonic()

@@ -38,6 +38,7 @@
             "description": "How often Vin is read from the ADC",
             "default": 1.0,
             "minimum": 0,
+            "exclusiveMinimum": true,
             "propertyOrder": 4
         },
         "adc_error_threshold": {
@@ -54,6 +55,7 @@
             "description": "How often the heartbeat control is published",
             "default": 10.0,
             "minimum": 0,
+            "exclusiveMinimum": true,
             "propertyOrder": 6
         }
     },

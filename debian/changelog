@@ -1,3 +1,17 @@
+wb-vout-watchdog (1.2.0) stable; urgency=medium
+
+  * Publish nothing while the MQTT broker is away: the replayed backlog of Vin
+    samples and heartbeats made mosquitto answer "Quota exceeded" on reconnect;
+    the current state is republished on every connect as before
+  * Exit with 2 when the broker rejects the MQTT login instead of retrying it
+  * Add -c/--config; the confed schema no longer accepts zero periods
+  * Report when the retained topics cannot be removed at stop because the
+    broker is not connected
+  * Depend on python3-paho-mqtt >= 2.1: the unix-socket transport the service
+    connects to mosquitto through exists since paho 2.1
+
+ -- Ekaterina Volkova <ekaterina.volkova@wirenboard.com>  Thu, 17 Sep 2026 16:00:36 +0000
+
 wb-vout-watchdog (1.1.0) stable; urgency=medium
 
   * Drop the python3-libgpiod dependency: the Vout line is driven through the

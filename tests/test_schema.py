@@ -67,3 +67,10 @@ def test_top_level_defaults_match_config_defaults(schema):
 
 def test_config_file_path_matches_the_default_used_by_main(schema):
     assert schema["configFile"]["path"] == "/etc/wb-vout-watchdog.conf"
+
+
+@pytest.mark.parametrize("period", ["adc_poll_period_s", "heartbeat_period_s"])
+def test_periods_are_strictly_positive_in_the_schema(schema, period):
+    """`config.py` rejects a zero period; confed must not offer one."""
+    assert schema["properties"][period]["minimum"] == 0
+    assert schema["properties"][period]["exclusiveMinimum"] is True

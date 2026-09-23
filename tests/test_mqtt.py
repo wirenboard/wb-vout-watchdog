@@ -24,11 +24,13 @@ from tests.conftest import (
 )
 from wb_vout_watchdog.mqtt import (
     DEVICE_TOPIC_PREFIX,
+    LOGIN_REJECTED_REASON_CODES,
     Control,
     ControlMeta,
     ControlType,
     MqttConnected,
     MqttDevice,
+    MqttLoginRejected,
     command_topic,
 )
 from wb_vout_watchdog.power_logic import EnableVoutRequested, VoutSwitchRequested
@@ -290,5 +292,51 @@ class TestOnMessage:
         device.on_message(
             None, None, FakeMessage(topic=command_topic(Control.VOUT), payload=b"1", retain=True)
         )
+
+        assert event_queue.empty()
+
+
+class TestDisconnectedPublishing:
+    def test_publishes_are_dropped_while_the_broker_is_away(self, device, fake_client):
+        """Nothing may be queued while disconnected: paho would replay the whole backlog of Vin
+        samples and heartbeats on reconnect and mosquitto would drop the connection again with
+        "Quota exceeded". The current state is republished on connect anyway."""
+        fake_client.connected = False
+
+        device.publish_vin(21.5)
+        device.publish_heartbeat(1234567890)
+        device.publish_undervoltage(True)
+
+        assert fake_client.published == []
+
+    def test_clear_retained_without_a_connection_logs_an_error_and_publishes_nothing(
+        self, device, fake_client, caplog
+    ):
+        """With no connection at stop time `clear_retained` is a no-op: nothing is published at all
+        (unlike the unreachable-broker test above, where the clears are queued and
+        `wait_for_publish` raises) and an error says the retained topics stay."""
+        fake_client.connected = False
+        caplog.set_level(logging.ERROR)
+
+        device.clear_retained()
+
+        assert fake_client.published == []
+        assert "retained topics cannot be removed" in caplog.text
+
+
+class TestRejectedLogin:
+    @pytest.mark.parametrize("reason_code", LOGIN_REJECTED_REASON_CODES)
+    def test_rejected_login_enqueues_login_rejected(self, device, fake_client, event_queue, reason_code):
+        """A CONNACK with a rejected-login reason code ("bad user name or password", "not
+        authorized") puts `MqttLoginRejected` on the event queue and subscribes to nothing: the
+        service decides to stop instead of paho retrying the same credentials forever."""
+        device.on_connect(fake_client, None, None, FakeReasonCode(is_failure=True, value=reason_code))
+
+        assert isinstance(event_queue.get_nowait(), MqttLoginRejected)
+        assert fake_client.subscriptions == []
+
+    def test_other_connect_failures_enqueue_nothing(self, device, fake_client, event_queue):
+        """A broker that is not ready yet is retried by paho; only a rejected login is final."""
+        device.on_connect(fake_client, None, None, FakeReasonCode(is_failure=True, value=136))
 
         assert event_queue.empty()
