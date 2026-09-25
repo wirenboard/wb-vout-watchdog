@@ -4,7 +4,7 @@ wb-vout-watchdog (1.2.0) stable; urgency=medium
     samples and heartbeats made mosquitto answer "Quota exceeded" on reconnect;
     the current state is republished on every connect as before
   * Exit with 2 when the broker rejects the MQTT login instead of retrying it
-  * Add -c/--config; the confed schema no longer accepts zero periods
+  * The confed schema no longer accepts zero periods
   * Report when the retained topics cannot be removed at stop because the
     broker is not connected
   * Depend on python3-paho-mqtt >= 2.1: the unix-socket transport the service

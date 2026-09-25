@@ -31,7 +31,6 @@ RESTARTABLE_STARTUP_ERRORS = (DeviceTreeError, GpioError, AdcError)
 
 def main(argv):
     parser = argparse.ArgumentParser(description="Wiren Board Vout undervoltage watchdog")
-    parser.add_argument("-c", "--config", default=CONFIG_FILEPATH, help="Config file path")
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -45,7 +44,7 @@ def main(argv):
     )
 
     try:
-        config = load_config(args.config)
+        config = load_config(CONFIG_FILEPATH)
     except ConfigError as exc:
         logging.error("%s", exc)
         return EXIT_NOTCONFIGURED

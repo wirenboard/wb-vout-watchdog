@@ -104,22 +104,6 @@ def test_stop_signal_handler_asks_the_service_to_stop(monkeypatch):
         assert created["service"].stopped is True
 
 
-def test_config_path_option_is_passed_to_load_config(monkeypatch):
-    """`-c PATH` must reach `load_config` as given: with the fake service in place main() exits 0
-    and the only path loaded is the one from the command line, not the default."""
-    _install_fake_service(monkeypatch)
-    loaded = []
-
-    def record_config_path(path):
-        loaded.append(path)
-        return Config()
-
-    monkeypatch.setattr(main_module, "load_config", record_config_path)
-
-    assert main_module.main(ARGV + ["-c", "/tmp/custom.conf"]) == main_module.EXIT_SUCCESS
-    assert loaded == ["/tmp/custom.conf"]
-
-
 def test_rejected_mqtt_login_returns_the_invalid_argument_code(monkeypatch):
     """A login the broker rejects is a configuration problem a restart cannot fix: `Service`
     stops itself with `login_rejected` set and main() must exit with EXIT_INVALIDARGUMENT, which
