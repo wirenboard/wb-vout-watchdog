@@ -40,6 +40,7 @@ class DtFixture:
 @dataclass
 class FakeReasonCode:
     is_failure: bool = False
+    value: int = 0
 
 
 @dataclass
@@ -76,7 +77,12 @@ class FakeMqttClient:
         self.connect_args = None
         self.loop_started = False
         self.logger_enabled = False
+        # connected from the start: most tests exercise publishing, not the connection state
+        self.connected = True
         FakeMqttClient.instances.append(self)
+
+    def is_connected(self):
+        return self.connected
 
     def enable_logger(self, logger=None):
         del logger

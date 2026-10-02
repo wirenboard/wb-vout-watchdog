@@ -13,11 +13,12 @@ from wb_vout_watchdog.service import Service
 
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
-# A broken config won't be fixed by retrying, so exit with the WB "not configured" code (6, as
-# in wb-mqtt-dali) that the unit's `RestartPreventExitStatus=2 6` matches to stop systemd
-# restarting us -- the unit stays failed until the config is fixed. (2 there is argparse's
-# bad-CLI-args exit.) Every other startup error is transient (`EXIT_FAILURE`), so systemd
-# restarts us after `RestartSec`, indefinitely.
+# Neither of these two is fixed by a restart, so the unit's `RestartPreventExitStatus=2 6` leaves
+# the unit failed until the cause is fixed: 2 is bad CLI arguments (argparse's own exit) or a login
+# the MQTT broker rejects, 6 is a broken config -- the WB "not configured" code, as in wb-mqtt-dali.
+# Every other startup error is transient (`EXIT_FAILURE`), so systemd restarts us after
+# `RestartSec`, indefinitely.
+EXIT_INVALIDARGUMENT = 2
 EXIT_NOTCONFIGURED = 6
 
 CONFIG_FILEPATH = "/etc/wb-vout-watchdog.conf"
@@ -57,6 +58,8 @@ def main(argv):
         logging.error("%s", exc)
         return EXIT_FAILURE
 
+    if service.login_rejected:
+        return EXIT_INVALIDARGUMENT
     return EXIT_SUCCESS
 
 

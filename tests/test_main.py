@@ -33,7 +33,7 @@ def _restore_signal_handlers():
         signal.signal(sig, handler)
 
 
-def _install_fake_service(monkeypatch, run_error=None):
+def _install_fake_service(monkeypatch, run_error=None, login_rejected=False):
     """Point main() at a fake `load_config`/`Service`; return a dict that captures the created
     service instance so a test can reach it after main() returns (e.g. to fire a signal)."""
     created = {}
@@ -42,6 +42,7 @@ def _install_fake_service(monkeypatch, run_error=None):
         def __init__(self, config):
             del config
             self.stopped = False
+            self.login_rejected = login_rejected
             created["service"] = self
 
         def run(self):
@@ -101,3 +102,12 @@ def test_stop_signal_handler_asks_the_service_to_stop(monkeypatch):
         assert callable(handler)
         handler(sig, None)
         assert created["service"].stopped is True
+
+
+def test_rejected_mqtt_login_returns_the_invalid_argument_code(monkeypatch):
+    """A login the broker rejects is a configuration problem a restart cannot fix: `Service`
+    stops itself with `login_rejected` set and main() must exit with EXIT_INVALIDARGUMENT, which
+    the unit's RestartPreventExitStatus matches."""
+    _install_fake_service(monkeypatch, login_rejected=True)
+
+    assert main_module.main(ARGV) == main_module.EXIT_INVALIDARGUMENT
