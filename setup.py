@@ -14,7 +14,7 @@ setup(
     maintainer="Wiren Board Team",
     maintainer_email="info@wirenboard.com",
     description="Wiren Board Vout undervoltage watchdog",
-    license="MIT",
+    license="MIT-WB",
     url="https://github.com/wirenboard/wb-vout-watchdog",
     packages=["wb_vout_watchdog"],
 )
